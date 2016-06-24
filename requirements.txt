@@ -1,2 +1,6 @@
 paramiko
-errbot
+errbot[slack]
+six
+notifier
+retrying
+cachetools

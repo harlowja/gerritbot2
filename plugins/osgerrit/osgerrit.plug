@@ -1,0 +1,9 @@
+[Core]
+Name = osgerrit
+Module = osgerrit
+
+[Documentation]
+Description = This plugin echos and formats and filters osgerrit events.
+
+[Python]
+Version = 2+
