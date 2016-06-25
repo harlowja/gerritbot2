@@ -138,10 +138,17 @@ class OsGerritBotPlugin(BotPlugin):
             return
         created_on = datetime.fromtimestamp(event['patchSet']['createdOn'])
         self.seen_reviews[change_id] = created_on
+        inserts = min(0, event['patchSet'].get('sizeInsertions', 0))
+        inserts = "+%s" % inserts
+        deletes = max(0, event['patchSet'].get('sizeDeletions', 0))
+        if deletes == 0:
+            deletes = "-0"
+        else:
+            deletes = str(deletes)
         tpl_params = {
             'created_on': created_on,
-            'inserts': "+%s" % event['patchSet'].get('sizeInsertions', 0),
-            'deletes': "%s" % event['patchSet'].get('sizeDeletions', 0),
+            'inserts': inserts,
+            'deletes': deletes,
         }
         for k in ['owner', 'author', 'uploader']:
             if k in event['patchSet']:
