@@ -50,7 +50,14 @@ class OsGerritWatcher(threading.Thread):
     def run(self):
 
         def retry_if_io_error(excp):
-            return isinstance(excp, (paramiko.ChannelException, IOError))
+            try_again = isinstance(excp, (paramiko.ChannelException, IOError))
+            if try_again:
+                self.log.exception("Failed with exception (retrying)",
+                                   exc_info=True)
+            else:
+                self.log.exception("Failed with exception (not retrying)",
+                                   exc_info=True)
+            return try_again
 
         @retrying.retry(
             wait_exponential_multiplier=1000, wait_exponential_max=10000,
@@ -85,7 +92,7 @@ class OsGerritBotPlugin(BotPlugin):
         'gerrit_port': 29418,
         'gerrit_user': get_gerrit_user(),
         'gerrit_keyfile': '~/.ssh/id_rsa.pub',
-        'email_suffixes': [],
+        'email_suffixes': ['godaddy.com'],
         'emails': [],
         'max_cache_size': 1000,
         'max_cache_seen_ttl': 60 * 60,
@@ -134,7 +141,7 @@ class OsGerritBotPlugin(BotPlugin):
         if not self.ok_by_email(event):
             return
         change_id = event['change']['id']
-        if change_id in self.seen_reviews:
+        if self.seen_reviews and change_id in self.seen_reviews:
             return
         created_on = datetime.fromtimestamp(event['patchSet']['createdOn'])
         self.seen_reviews[change_id] = created_on
@@ -157,9 +164,13 @@ class OsGerritBotPlugin(BotPlugin):
         tpl_params['change']['commitMessageLines'] = []
         for line in tpl_params['change']['commitMessage'].splitlines():
             tpl_params['change']['commitMessageLines'].append(line)
+        summary = self._bot.process_template('proposal', tpl_params)
         for room in self.rooms():
-            self.send_templated(self.build_identifier(str(room)),
-                                'proposal', tpl_params)
+            self.send_card(
+                body=tpl_params['change']['commitMessage'],
+                to=room,
+                link=tpl_params['change']['url'],
+                summary=summary)
 
     def process_event(self, event_type, details):
         event_type = None
