@@ -18,6 +18,8 @@ import notifier
 import paramiko
 import retrying
 
+import six
+
 
 def get_gerrit_user():
     user = os.getenv("GERRIT_USER")
@@ -34,6 +36,51 @@ def make_and_connect_client(hostname, username,
     client.connect(hostname, username=username,
                    port=port, key_filename=key_filename)
     return client
+
+
+def filter_by_prior(func):
+
+    @six.wraps(func)
+    def wrapper(self, event):
+        change_id = event['change']['id']
+        if self.seen_reviews and change_id in self.seen_reviews:
+            return
+        else:
+            func(self, event)
+            self.seen_reviews[change_id] = True
+
+    return wrapper
+
+
+def filter_by_email(func):
+
+    @six.wraps(func)
+    def wrapper(self, event):
+        incoming_emails = []
+        for k in ['owner', 'author', 'uploader']:
+            if k in event['patchSet']:
+                try:
+                    incoming_emails.append(event['patchSet'][k]['email'])
+                except KeyError:
+                    pass
+        send_message = False
+        if len(self.config['email_suffixes']) == 0:
+            send_message = True
+        else:
+            for ok_suffix in self.config['email_suffixes']:
+                if ok_suffix == "*":
+                    send_message = True
+                else:
+                    for in_email in incoming_emails:
+                        if in_email.endswith(ok_suffix):
+                            send_message = True
+        for in_email in incoming_emails:
+            if in_email in self.config['emails']:
+                send_message = True
+        if send_message:
+            func(self, event)
+
+    return wrapper
 
 
 class OsGerritWatcher(threading.Thread):
@@ -110,41 +157,13 @@ class OsGerritBotPlugin(BotPlugin):
         super(OsGerritBotPlugin, self).configure(configuration)
         self.log.debug("Bot configuration: %s", self.config)
 
-    def ok_by_email(self, event):
-        incoming_emails = []
-        for k in ['owner', 'author', 'uploader']:
-            if k in event['patchSet']:
-                try:
-                    incoming_emails.append(event['patchSet'][k]['email'])
-                except KeyError:
-                    pass
-        send_message = False
-        if len(self.config['email_suffixes']) == 0:
-            send_message = True
-        else:
-            for ok_suffix in self.config['email_suffixes']:
-                if ok_suffix == "*":
-                    send_message = True
-                else:
-                    for in_email in incoming_emails:
-                        if in_email.endswith(ok_suffix):
-                            send_message = True
-        for in_email in incoming_emails:
-            if in_email in self.config['emails']:
-                send_message = True
-        return send_message
-
     def get_configuration_template(self):
         return copy.deepcopy(self.DEF_CONFIG)
 
+    @filter_by_email
+    @filter_by_prior
     def process_patchset_created(self, event):
-        if not self.ok_by_email(event):
-            return
-        change_id = event['change']['id']
-        if self.seen_reviews and change_id in self.seen_reviews:
-            return
         created_on = datetime.fromtimestamp(event['patchSet']['createdOn'])
-        self.seen_reviews[change_id] = created_on
         inserts = event['patchSet'].get('sizeInsertions', 0)
         inserts = "+%s" % inserts
         deletes = event['patchSet'].get('sizeDeletions', 0)
