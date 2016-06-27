@@ -145,9 +145,9 @@ class OsGerritBotPlugin(BotPlugin):
             return
         created_on = datetime.fromtimestamp(event['patchSet']['createdOn'])
         self.seen_reviews[change_id] = created_on
-        inserts = min(0, event['patchSet'].get('sizeInsertions', 0))
+        inserts = event['patchSet'].get('sizeInsertions', 0)
         inserts = "+%s" % inserts
-        deletes = max(0, event['patchSet'].get('sizeDeletions', 0))
+        deletes = event['patchSet'].get('sizeDeletions', 0)
         if deletes == 0:
             deletes = "-0"
         else:
