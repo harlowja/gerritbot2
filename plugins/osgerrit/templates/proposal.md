@@ -1,1 +1,1 @@
-<mailto:{{ uploader.email }}|{{ uploader.name }}> proposed change `{{ change.subject }}` at {{ change.url }} ({{ inserts }}|{{ deletes }}).
+<mailto:{{ uploader.email }}|{{ uploader.name }}> proposed change `{{ change.subject }}` at {{ change.url }} in project {{ change.project }} ({{ inserts }}|{{ deletes }}).
