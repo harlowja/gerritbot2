@@ -83,12 +83,12 @@ def filter_by_email(func):
     return wrapper
 
 
-class OsGerritWatcher(threading.Thread):
+class GerritWatcher(threading.Thread):
     SELECT_WAIT = 0.1
     GERRIT_ACTIVITY = "GERRIT_ACTIVITY"
 
     def __init__(self, log, config):
-        super(OsGerritWatcher, self).__init__()
+        super(GerritWatcher, self).__init__()
         self.dead = threading.Event()
         self.notifier = notifier.Notifier()
         self.log = log
@@ -117,6 +117,9 @@ class OsGerritWatcher(threading.Thread):
                 self.config['gerrit_user'],
                 port=int(self.config['gerrit_port']),
                 key_filename=os.path.expanduser(self.config['gerrit_keyfile']))
+            self.log.debug("Connected to gerrit via %s@%s",
+                           self.config['gerrit_user'],
+                           self.config['gerrit_hostname'])
             with contextlib.closing(client):
                 _stdin, stdout, _stderr = client.exec_command(
                     "gerrit stream-events")
@@ -131,7 +134,7 @@ class OsGerritWatcher(threading.Thread):
         run_forever_until_dead()
 
 
-class OsGerritBotPlugin(BotPlugin):
+class GerritBotPlugin(BotPlugin):
 
     #: Default configuration template that should be provided...
     DEF_CONFIG = {
@@ -139,14 +142,19 @@ class OsGerritBotPlugin(BotPlugin):
         'gerrit_port': 29418,
         'gerrit_user': get_gerrit_user(),
         'gerrit_keyfile': '~/.ssh/id_rsa.pub',
-        'email_suffixes': ['godaddy.com'],
+        'email_suffixes': [],
         'emails': [],
+        'include_commit_body': False,
         'max_cache_size': 1000,
         'max_cache_seen_ttl': 60 * 60,
+        'projects': [],
+        'exclude_events': [
+            'comment-added',
+        ],
     }
 
     def __init__(self, bot):
-        super(OsGerritBotPlugin, self).__init__(bot)
+        super(GerritBotPlugin, self).__init__(bot)
         self.watcher = None
         self.seen_reviews = None
 
@@ -154,11 +162,24 @@ class OsGerritBotPlugin(BotPlugin):
         if not configuration:
             configuration = {}
         configuration.update(copy.deepcopy(self.DEF_CONFIG))
-        super(OsGerritBotPlugin, self).configure(configuration)
+        super(GerritBotPlugin, self).configure(configuration)
         self.log.debug("Bot configuration: %s", self.config)
 
     def get_configuration_template(self):
         return copy.deepcopy(self.DEF_CONFIG)
+
+    @filter_by_email
+    @filter_by_prior
+    def process_comment_added(self, event):
+        tpl_params = {}
+        for k in ['author', 'change', 'comment']:
+            tpl_params[k] = copy.deepcopy(event[k])
+        summary = self._bot.process_template('comment', tpl_params)
+        for room in self.rooms():
+            self.send_card(
+                to=room,
+                link=tpl_params['change']['url'],
+                summary=summary)
 
     @filter_by_email
     @filter_by_prior
@@ -185,11 +206,17 @@ class OsGerritBotPlugin(BotPlugin):
             tpl_params['change']['commitMessageLines'].append(line)
         summary = self._bot.process_template('proposal', tpl_params)
         for room in self.rooms():
-            self.send_card(
-                body=tpl_params['change']['commitMessage'],
-                to=room,
-                link=tpl_params['change']['url'],
-                summary=summary)
+            if self.config['include_commit_body']:
+                self.send_card(
+                    body=tpl_params['change']['commitMessage'],
+                    to=room,
+                    link=tpl_params['change']['url'],
+                    summary=summary)
+            else:
+                self.send_card(
+                    to=room,
+                    link=tpl_params['change']['url'],
+                    summary=summary)
 
     def process_event(self, event_type, details):
         event_type = None
@@ -201,34 +228,48 @@ class OsGerritBotPlugin(BotPlugin):
             return
         event = details['event']
         self.log.debug(
-            "Processing event %s with details: %s", event_type, event)
+            "Processing event '%s' with details: %s", event_type, event)
+        if event_type in self.config['exclude_events']:
+            self.log.debug("Discarding event '%s', event type marked"
+                           " to be excluded from processing.",
+                           event_type)
+            return
+        event_project = event.get('project')
+        if (self.config['projects']
+                and event_project not in self.config['projects']):
+            self.log.debug("Discarding event '%s', project '%s' not"
+                           " registered to receive events from.",
+                           event_type, event_project)
+            return
         event_type_func = "process_%s" % event_type.replace("-", "_")
         try:
             event_func = getattr(self, event_type_func)
         except AttributeError:
-            pass
+            self.log.debug("Discarding event '%s', no handler found.",
+                           event_type)
         else:
             try:
                 event_func(event)
             except Exception:
-                self.log.exception("Failed dispatching event '%s' to '%s'",
-                                   event_type, event_type_func)
+                self.log.exception("Failed dispatching event '%s'"
+                                   " to '%s'", event_type,
+                                   event_type_func)
 
     def activate(self):
-        super(OsGerritBotPlugin, self).activate()
+        super(GerritBotPlugin, self).activate()
         if not self.config:
             return
         self.seen_reviews = cachetools.TTLCache(
             self.config['max_cache_size'],
             self.config['max_cache_seen_ttl'])
-        self.watcher = OsGerritWatcher(self.log, self.config)
+        self.watcher = GerritWatcher(self.log, self.config)
         self.watcher.notifier.register(
             self.watcher.GERRIT_ACTIVITY, self.process_event)
         self.watcher.daemon = True
         self.watcher.start()
 
     def deactivate(self):
-        super(OsGerritBotPlugin, self).deactivate()
+        super(GerritBotPlugin, self).deactivate()
         if self.watcher is not None:
             self.watcher.dead.set()
             self.watcher.join()
