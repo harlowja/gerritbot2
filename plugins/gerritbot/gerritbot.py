@@ -104,12 +104,12 @@ class GerritWatcher(threading.Thread):
                 self.log.exception("Failed with exception (retrying)",
                                    exc_info=True)
                 self.bot_plugin.warn_admins("Gerrit watching failed"
-                                            " due to `%s` (retrying)" % excp)
+                                            " due to '%s' (retrying)" % excp)
             else:
                 self.log.exception("Failed with exception (not retrying)",
                                    exc_info=True)
                 self.bot_plugin.warn_admins("Gerrit watching failed"
-                                            " due to `%s` (not"
+                                            " due to '%s' (not"
                                             " retrying)" % excp)
             return try_again
 
