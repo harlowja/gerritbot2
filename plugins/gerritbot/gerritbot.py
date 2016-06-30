@@ -136,6 +136,24 @@ class GerritWatcher(threading.Thread):
 
 class GerritBotPlugin(BotPlugin):
 
+    #: Known gerrit event types...
+    GERRIT_EVENTS = frozenset([
+        'change-abandoned',
+        'change-merged',
+        'change-restored',
+        'comment-added',
+        'draft-published',
+        'merge-failed',
+        'patchset-created',
+        'patchset-notified',
+        'project-created',
+        'ref-replicated',
+        'ref-replication-done',
+        'ref-updated',
+        'reviewer-added',
+        'topic-changed',
+    ])
+
     #: Default configuration template that should be provided...
     DEF_CONFIG = {
         'gerrit_hostname': 'review.openstack.org',
@@ -241,6 +259,10 @@ class GerritBotPlugin(BotPlugin):
         event = details['event']
         self.log.debug(
             "Processing event '%s' with details: %s", event_type, event)
+        if event_type not in self.GERRIT_EVENTS:
+            self.log.info("Discarding event '%s', event type not known",
+                          event_type)
+            return
         if event_type in self.config['exclude_events']:
             self.log.debug("Discarding event '%s', event type marked"
                            " to be excluded from processing.",
