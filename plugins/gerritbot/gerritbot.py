@@ -128,7 +128,7 @@ class GerritWatcher(threading.Thread):
                            self.config['gerrit_user'],
                            self.config['gerrit_hostname'])
             with contextlib.closing(client):
-                _stdin, stdout, _stderr = client.exec_command(
+                _stdin, stdout, stderr = client.exec_command(
                     "gerrit stream-events")
                 while not self.dead.is_set():
                     rlist, _wlist, _xlist = select.select(
