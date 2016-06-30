@@ -128,27 +128,19 @@ class GerritWatcher(threading.Thread):
                            self.config['gerrit_user'],
                            self.config['gerrit_hostname'])
             with contextlib.closing(client):
-                _stdin, stdout, stderr = client.exec_command(
+                _stdin, stdout, _stderr = client.exec_command(
                     "gerrit stream-events")
                 while not self.dead.is_set():
                     rlist, _wlist, _xlist = select.select(
-                        [stdout.channel, stderr.channel],
+                        [stdout.channel],
                         [], [], self.SELECT_WAIT)
                     if not rlist:
                         continue
-                    for c in rlist:
-                        if c is stderr.channel:
-                            error = stderr.readline()
-                            if not error:
-                                raise IOError("Remote server"
-                                              " connection closed")
-                            raise IOError(error)
-                        else:
-                            event_data = {
-                                "event": json.loads(stdout.readline()),
-                            }
-                            self.notifier.notify(
-                                self.GERRIT_ACTIVITY, event_data)
+                    event_data = {
+                        "event": json.loads(stdout.readline()),
+                    }
+                    self.notifier.notify(
+                        self.GERRIT_ACTIVITY, event_data)
 
         run_forever_until_dead()
 
