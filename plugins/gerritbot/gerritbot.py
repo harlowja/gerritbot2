@@ -10,6 +10,7 @@ import json
 import os
 import select
 import threading
+import weakref
 
 from errbot import BotPlugin
 
@@ -87,12 +88,13 @@ class GerritWatcher(threading.Thread):
     SELECT_WAIT = 0.1
     GERRIT_ACTIVITY = "GERRIT_ACTIVITY"
 
-    def __init__(self, log, config):
+    def __init__(self, bot_plugin):
         super(GerritWatcher, self).__init__()
+        self.bot_plugin = weakref.proxy(bot_plugin)
         self.dead = threading.Event()
         self.notifier = notifier.Notifier()
-        self.log = log
-        self.config = config
+        self.log = bot_plugin.log
+        self.config = bot_plugin.config
 
     def run(self):
 
@@ -101,9 +103,14 @@ class GerritWatcher(threading.Thread):
             if try_again:
                 self.log.exception("Failed with exception (retrying)",
                                    exc_info=True)
+                self.bot_plugin.warn_admins("Gerrit watching failed"
+                                            " due to `%s` (retrying)" % excp)
             else:
                 self.log.exception("Failed with exception (not retrying)",
                                    exc_info=True)
+                self.bot_plugin.warn_admins("Gerrit watching failed"
+                                            " due to `%s` (not"
+                                            " retrying)" % excp)
             return try_again
 
         @retrying.retry(
@@ -125,11 +132,23 @@ class GerritWatcher(threading.Thread):
                     "gerrit stream-events")
                 while not self.dead.is_set():
                     rlist, _wlist, _xlist = select.select(
-                        [stdout.channel], [], [], self.SELECT_WAIT)
+                        [stdout.channel, stderr.channel],
+                        [], [], self.SELECT_WAIT)
                     if not rlist:
                         continue
-                    event_data = {"event": json.loads(stdout.readline())}
-                    self.notifier.notify(self.GERRIT_ACTIVITY, event_data)
+                    for c in rlist:
+                        if c is stderr.channel:
+                            error = stderr.readline()
+                            if not error:
+                                raise IOError("Remote server"
+                                              " connection closed")
+                            raise IOError(error)
+                        else:
+                            event_data = {
+                                "event": json.loads(stdout.readline()),
+                            }
+                            self.notifier.notify(
+                                self.GERRIT_ACTIVITY, event_data)
 
         run_forever_until_dead()
 
@@ -296,7 +315,7 @@ class GerritBotPlugin(BotPlugin):
         self.seen_reviews = cachetools.TTLCache(
             self.config['max_cache_size'],
             self.config['max_cache_seen_ttl'])
-        self.watcher = GerritWatcher(self.log, self.config)
+        self.watcher = GerritWatcher(self)
         self.watcher.notifier.register(
             self.watcher.GERRIT_ACTIVITY, self.process_event)
         self.watcher.daemon = True
