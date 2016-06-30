@@ -149,7 +149,19 @@ class GerritBotPlugin(BotPlugin):
         'max_cache_seen_ttl': 60 * 60,
         'projects': [],
         'exclude_events': [
+            'change-abandoned',
+            'change-merged',
+            'change-restored',
             'comment-added',
+            'draft-published',
+            'merge-failed',
+            'patchset-notified',
+            'project-created',
+            'ref-replicated',
+            'ref-replication-done',
+            'ref-updated',
+            'reviewer-added',
+            'topic-changed',
         ],
     }
 
