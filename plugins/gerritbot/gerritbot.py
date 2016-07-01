@@ -59,6 +59,11 @@ def filter_by_email(func):
     def wrapper(self, event):
         incoming_emails = []
         for k in ['owner', 'author', 'uploader']:
+            if k in event:
+                try:
+                    incoming_emails.append(event[k]['email'])
+                except KeyError:
+                    pass
             if k in event['patchSet']:
                 try:
                     incoming_emails.append(event['patchSet'][k]['email'])
