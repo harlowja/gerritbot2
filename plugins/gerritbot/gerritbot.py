@@ -62,12 +62,12 @@ def filter_by_email(func):
             if k in event:
                 try:
                     incoming_emails.append(event[k]['email'])
-                except KeyError:
+                except (TypeError, KeyError):
                     pass
             if k in event['patchSet']:
                 try:
                     incoming_emails.append(event['patchSet'][k]['email'])
-                except KeyError:
+                except (TypeError, KeyError):
                     pass
         send_message = False
         if len(self.config['email_suffixes']) == 0:
