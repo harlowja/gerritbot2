@@ -327,7 +327,7 @@ class GerritBotPlugin(BotPlugin):
         for room in self.rooms():
             self.send_card(
                 to=room,
-                link=event.url,
+                link=event.change.url,
                 summary=summary)
 
     @filter_by_email
