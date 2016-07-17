@@ -119,7 +119,7 @@ class Entity(object):
 
 class PatchSet(object):
     def __init__(self, kind, author,
-                 inserts, inserts,
+                 inserts, deletes,
                  uploader, revision, created_on):
         self.kind = kind
         self.author = author
