@@ -3,16 +3,18 @@ from __future__ import unicode_literals
 
 from datetime import datetime
 
-import contextlib
+import collections
 import copy
+import functools
 import getpass
 import json
 import os
 import select
+import string
 import threading
-import weakref
 
 from errbot import BotPlugin
+from errbot import botcmd
 
 import cachetools
 import notifier
@@ -20,6 +22,7 @@ import paramiko
 import retrying
 
 import six
+from tabulate import tabulate
 
 
 def get_gerrit_user():
@@ -34,16 +37,29 @@ def make_and_connect_client(hostname, username,
     client = paramiko.SSHClient()
     client.load_system_host_keys()
     client.set_missing_host_key_policy(paramiko.WarningPolicy())
-    client.connect(hostname, username=username,
-                   port=port, key_filename=key_filename)
-    return client
+    try:
+        client.connect(hostname, username=username,
+                       port=port, key_filename=key_filename)
+    except paramiko.SSHException:
+        # TODO(harlowja): add something into paramiko so that we can
+        # actually tell if its connected or not...
+        client.connected = False
+        raise
+    else:
+        client.connected = True
+        return client
 
 
 def filter_by_prior(func):
 
     @six.wraps(func)
     def wrapper(self, event):
-        change_id = event['change']['id']
+        change_id = None
+        if isinstance(event, (PatchSetCreated, CommentAdded)):
+            change_id = event.change.id
+        if change_id is None:
+            func(self, event)
+            return
         if self.seen_reviews and change_id in self.seen_reviews:
             return
         else:
@@ -58,17 +74,18 @@ def filter_by_email(func):
     @six.wraps(func)
     def wrapper(self, event):
         incoming_emails = []
-        for k in ['owner', 'author', 'uploader']:
-            if k in event:
-                try:
-                    incoming_emails.append(event[k]['email'])
-                except (TypeError, KeyError):
-                    pass
-            if k in event['patchSet']:
-                try:
-                    incoming_emails.append(event['patchSet'][k]['email'])
-                except (TypeError, KeyError):
-                    pass
+        if isinstance(event, PatchSetCreated):
+            incoming_emails.append(event.change.owner.email)
+            incoming_emails.append(event.patch_set.author.email)
+            incoming_emails.append(event.patch_set.uploader.email)
+            incoming_emails.append(event.uploader.email)
+        if isinstance(event, CommentAdded):
+            incoming_emails.append(event.change.owner.email)
+            incoming_emails.append(event.patch_set.author.email)
+            incoming_emails.append(event.patch_set.uploader.email)
+            incoming_emails.append(event.author.email)
+        incoming_emails = set(email for email in incoming_emails
+                              if email is not None)
         send_message = False
         if len(self.config['email_suffixes']) == 0:
             send_message = True
@@ -89,19 +106,111 @@ def filter_by_email(func):
     return wrapper
 
 
-class GerritWatcher(threading.Thread):
+class Entity(object):
+    def __init__(self, username, name, email=None):
+        self.username = username
+        self.name = name
+        self.email = email
+
+    @classmethod
+    def from_data(cls, data):
+        return cls(data['username'], data['name'], email=data.get('email'))
+
+
+class PatchSet(object):
+    def __init__(self, kind, author,
+                 inserts, inserts,
+                 uploader, revision, created_on):
+        self.kind = kind
+        self.author = author
+        self.inserts = int(inserts)
+        self.deletes = int(deletes)
+        self.uploader = uploader
+        self.revision = revision
+        self.created_on = created_on
+
+    @classmethod
+    def from_data(cls, data):
+        return cls(data['kind'], Entity.from_data(data['author']),
+                   data['sizeInsertions'], data['sizeDeletions'],
+                   Entity.from_data(data['uploader']), data['revision'],
+                   datetime.fromtimestamp(data['createdOn']))
+
+
+class Change(object):
+    def __init__(self, status, commit_message, number,
+                 url, project, owner, subject,
+                 branch, id, topic=None):
+        self.url = url
+        self.id = id
+        self.number = int(number)
+        self.project = project
+        self.status = status
+        self.commit_message = commit_message
+        self.owner = owner
+        self.subject = subject
+        self.branch = branch
+        self.topic = topic
+
+    @classmethod
+    def from_data(cls, data):
+        return cls(data['status'], data['commitMessage'],
+                   data['number'], data['url'],
+                   data['project'], Entity.from_data(data['owner']),
+                   data['subject'], data['branch'],
+                   data['id'], topic=data.get('topic'))
+
+
+class PatchSetCreated(object):
+    def __init__(self, patch_set, change, uploader, created_on):
+        self.patch_set = patch_set
+        self.change = change
+        self.uploader = uploader
+        self.created_on = created_on
+
+    @classmethod
+    def from_data(cls, data):
+        return cls(PatchSet.from_data(data['patchSet']),
+                   Change.from_data(data['change']),
+                   Entity.from_data(data['uploader']),
+                   datetime.fromtimestamp(data['eventCreatedOn']))
+
+
+class CommentAdded(object):
+    def __init__(self, author, change, patch_set, created_on, comment=None):
+        self.comment = comment
+        self.patch_set = patch_set
+        self.change = change
+        self.created_on = created_on
+        self.author = author
+
+    @classmethod
+    def from_data(cls, data):
+        return cls(Entity.from_data(data['author']),
+                   Change.from_data(data['change']),
+                   PatchSet.from_data(data['patchSet']),
+                   datetime.fromtimestamp(data['eventCreatedOn']),
+                   comment=data.get('comment'))
+
+
+class GerritWatcher(object):
+
     SELECT_WAIT = 0.1
     GERRIT_ACTIVITY = "GERRIT_ACTIVITY"
 
-    def __init__(self, bot_plugin):
+    def __init__(self, log, make_a_client):
         super(GerritWatcher, self).__init__()
-        self.bot_plugin = weakref.proxy(bot_plugin)
         self.dead = threading.Event()
         self.notifier = notifier.Notifier()
-        self.log = bot_plugin.log
-        self.config = bot_plugin.config
+        self.log = log
+        self.make_a_client = make_a_client
 
-    def run(self):
+    def run(self, client=None):
+        # This is needed (to be an array) since python is sorta crappy
+        # about having variables that u change in local functions...
+        if client is None:
+            client = self.connect()
+        clients = [client]
 
         def retry_if_io_error(excp):
             try_again = isinstance(excp, (paramiko.ChannelException, IOError))
@@ -124,15 +233,10 @@ class GerritWatcher(threading.Thread):
         def run_forever_until_dead():
             if self.dead.is_set():
                 return
-            client = make_and_connect_client(
-                self.config['gerrit_hostname'],
-                self.config['gerrit_user'],
-                port=int(self.config['gerrit_port']),
-                key_filename=os.path.expanduser(self.config['gerrit_keyfile']))
-            self.log.debug("Connected to gerrit via %s@%s",
-                           self.config['gerrit_user'],
-                           self.config['gerrit_hostname'])
-            with contextlib.closing(client):
+            client = clients[0]
+            if not client.connected:
+                clients[0] = client = self.make_a_client()
+            try:
                 _stdin, stdout, _stderr = client.exec_command(
                     "gerrit stream-events")
                 while not self.dead.is_set():
@@ -146,29 +250,44 @@ class GerritWatcher(threading.Thread):
                     }
                     self.notifier.notify(
                         self.GERRIT_ACTIVITY, event_data)
+            finally:
+                client.close()
+                client.connected = False
 
-        run_forever_until_dead()
+        try:
+            run_forever_until_dead()
+        finally:
+            clients[0].close()
+            clients = []
 
 
 class GerritBotPlugin(BotPlugin):
 
-    #: Known gerrit event types...
-    GERRIT_EVENTS = frozenset([
-        'change-abandoned',
-        'change-merged',
-        'change-restored',
-        'comment-added',
-        'draft-published',
-        'merge-failed',
-        'patchset-created',
-        'patchset-notified',
-        'project-created',
-        'ref-replicated',
-        'ref-replication-done',
-        'ref-updated',
-        'reviewer-added',
-        'topic-changed',
-    ])
+    #: Known gerrit event types (to the class that can represent them)...
+    GERRIT_EVENTS = {
+        'change-abandoned': None,
+        'change-merged': None,
+        'change-restored': None,
+        'comment-added': CommentAdded,
+        'draft-published': None,
+        'merge-failed': None,
+        'patchset-created': PatchSetCreated,
+        'patchset-notified': None,
+        'project-created': None,
+        'ref-replicated': None,
+        'ref-replication-done': None,
+        'ref-updated': None,
+        'reviewer-added': None,
+        'topic-changed': None,
+    }
+
+    #: Initial stats gathered...
+    DEF_STATS = {
+        'event_types': collections.defaultdict(int),
+        'reviewers': collections.defaultdict(int),
+        'commenters': collections.defaultdict(int),
+        'projects': collections.defaultdict(int),
+    }
 
     #: Default configuration template that should be provided...
     DEF_CONFIG = {
@@ -182,27 +301,14 @@ class GerritBotPlugin(BotPlugin):
         'max_cache_size': 1000,
         'max_cache_seen_ttl': 60 * 60,
         'projects': [],
-        'exclude_events': [
-            'change-abandoned',
-            'change-merged',
-            'change-restored',
-            'comment-added',
-            'draft-published',
-            'merge-failed',
-            'patchset-notified',
-            'project-created',
-            'ref-replicated',
-            'ref-replication-done',
-            'ref-updated',
-            'reviewer-added',
-            'topic-changed',
-        ],
     }
 
     def __init__(self, bot):
         super(GerritBotPlugin, self).__init__(bot)
         self.watcher = None
+        self.watcher_runner = None
         self.seen_reviews = None
+        self.statistics = copy.deepcopy(self.DEF_STATS)
 
     def configure(self, configuration):
         if not configuration:
@@ -217,79 +323,83 @@ class GerritBotPlugin(BotPlugin):
     @filter_by_email
     @filter_by_prior
     def process_comment_added(self, event):
-        tpl_params = {}
-        for k in ['author', 'change', 'comment']:
-            tpl_params[k] = copy.deepcopy(event[k])
-        summary = self._bot.process_template('comment', tpl_params)
+        summary = self._bot.process_template('comment', {'event': event})
         for room in self.rooms():
             self.send_card(
                 to=room,
-                link=tpl_params['change']['url'],
+                link=event.url,
                 summary=summary)
 
     @filter_by_email
     @filter_by_prior
     def process_patchset_created(self, event):
-        created_on = datetime.fromtimestamp(event['patchSet']['createdOn'])
-        inserts = event['patchSet'].get('sizeInsertions', 0)
-        inserts = "+%s" % inserts
-        deletes = event['patchSet'].get('sizeDeletions', 0)
-        if deletes == 0:
-            deletes = "-0"
-        else:
-            deletes = str(deletes)
-        tpl_params = {
-            'created_on': created_on,
-            'inserts': inserts,
-            'deletes': deletes,
-        }
-        for k in ['owner', 'author', 'uploader']:
-            if k in event['patchSet']:
-                tpl_params[k] = copy.deepcopy(event['patchSet'][k])
-        tpl_params['change'] = copy.deepcopy(event['change'])
-        tpl_params['change']['commitMessageLines'] = []
-        for line in tpl_params['change']['commitMessage'].splitlines():
-            tpl_params['change']['commitMessageLines'].append(line)
-        summary = self._bot.process_template('proposal', tpl_params)
+        summary = self._bot.process_template('proposal', {'event': event})
         for room in self.rooms():
             if self.config['include_commit_body']:
                 self.send_card(
-                    body=tpl_params['change']['commitMessage'],
+                    body=event.change.commit_message,
                     to=room,
-                    link=tpl_params['change']['url'],
+                    link=event.change.url,
                     summary=summary)
             else:
                 self.send_card(
                     to=room,
-                    link=tpl_params['change']['url'],
+                    link=event.change.url,
                     summary=summary)
 
+    @botcmd(name="gerrit_stats", historize=False,
+            split_args_with=string.split)
+    def stats(self, msg, args):
+        self.log.debug("Stats called with args: %s", args)
+        buf = six.StringIO()
+        just_tables = sorted(six.iterkeys(self.statistics))
+        if args:
+            args_pieces = [p.strip() for p in args.split() if p.strip()]
+            if args_pieces:
+                just_tables = args_pieces
+        for i, tbl_name in enumerate(just_tables):
+            if tbl_name in self.statistics:
+                tbl = []
+                header = [tbl_name.replace("_", " ").title(), "Occurrences"]
+                if len(self.statistics[tbl_name]) == 0:
+                    tbl.append(['N/A', 'N/A'])
+                else:
+                    for k in sorted(six.iterkeys(self.statistics[tbl_name])):
+                        tbl.append([k, self.statistics[tbl_name][k]])
+                buf.write(tabulate(tbl, header, tablefmt="pipe"))
+                if i + 1 != len(just_tables):
+                    buf.write("\n\n")
+                else:
+                    buf.write("\n")
+        return buf.getvalue()
+
     def process_event(self, event_type, details):
-        event_type = None
         try:
-            event_type = details['event']['type']
-        except (KeyError, TypeError):
-            pass
-        if not event_type:
+            event_type = details['event'].pop('type')
+        except KeyError:
             return
-        event = details['event']
-        self.log.debug(
-            "Processing event '%s' with details: %s", event_type, event)
-        if event_type not in self.GERRIT_EVENTS:
+        self.statistics['event_types'][event_type] += 1
+        event_cls = self.GERRIT_EVENTS.get(event_type)
+        if event_cls is None:
             self.log.info("Discarding event '%s', event type not known",
                           event_type)
             return
-        if event_type in self.config['exclude_events']:
-            self.log.debug("Discarding event '%s', event type marked"
-                           " to be excluded from processing.",
-                           event_type)
-            return
-        event_project = event.get('project')
-        if (self.config['projects']
-                and event_project not in self.config['projects']):
-            self.log.debug("Discarding event '%s', project '%s' not"
-                           " registered to receive events from.",
-                           event_type, event_project)
+        event = details['event']
+        self.log.debug("Processing event %s using cls %s", event, event_cls)
+        event = event_cls.from_data(event)
+        event_project = None
+        if isinstance(event, (PatchSetCreated, CommentAdded)):
+            event_project = event.change.project
+        if (event_project is None or
+                (self.config['projects']
+                 and event_project not in self.config['projects'])):
+            if event_project:
+                self.log.debug("Discarding event '%s', project '%s' not"
+                               " registered to receive events from.",
+                               event_type, event_project)
+            else:
+                self.log.debug("Discarding event '%s', project not"
+                               " known.", event_type)
             return
         event_type_func = "process_%s" % event_type.replace("-", "_")
         try:
@@ -307,20 +417,29 @@ class GerritBotPlugin(BotPlugin):
 
     def activate(self):
         super(GerritBotPlugin, self).activate()
-        if not self.config:
-            return
         self.seen_reviews = cachetools.TTLCache(
             self.config['max_cache_size'],
             self.config['max_cache_seen_ttl'])
-        self.watcher = GerritWatcher(self)
+        self.statistics = copy.deepcopy(self.DEF_STATS)
+        make_a_client = functools.partial(
+            make_and_connect_client,
+            self.config['gerrit_hostname'],
+            self.config['gerrit_user'],
+            port=int(self.config['gerrit_port']),
+            key_filename=os.path.expanduser(self.config['gerrit_keyfile']))
+        self.watcher = GerritWatcher(self.log, make_a_client)
         self.watcher.notifier.register(
             self.watcher.GERRIT_ACTIVITY, self.process_event)
-        self.watcher.daemon = True
-        self.watcher.start()
+        self.watcher_runner = threading.Thread(
+            target=self.watcher.run,
+            kwargs={'client': make_a_client()})
+        self.watcher_runner.daemon = True
+        self.watcher_runner.start()
 
     def deactivate(self):
         super(GerritBotPlugin, self).deactivate()
-        if self.watcher is not None:
+        if self.watcher_runner is not None:
             self.watcher.dead.set()
-            self.watcher.join()
+            self.watcher_runner.join()
             self.watcher = None
+            self.watcher_runner = None

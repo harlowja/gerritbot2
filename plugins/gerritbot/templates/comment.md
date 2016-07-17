@@ -1,1 +1,1 @@
-{{ author.name }} added comment `{{ comment }}` on {{ change.url }} in project {{ change.project }}.
+{{ event.author.name }} added comment `{{ event.comment }}` on {{ event.change.url }} in project {{ event.change.project }}.

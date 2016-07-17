@@ -4,3 +4,4 @@ six
 notifier
 retrying
 cachetools
+tabulate

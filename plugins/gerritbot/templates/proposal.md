@@ -1,1 +1,1 @@
-[{{ uploader.name }}]({{ uploader.email }}) proposed change `{{ change.subject }}` at {{ change.url }} in project {{ change.project }} ({{ inserts }}|{{ deletes }}).
+[{{ event.uploader.name }}]({{ event.uploader.email }}) proposed change `{{ event.change.subject }}` at {{ event.change.url }} in project {{ event.change.project }} ({{ event.patch_set.inserts }}|{{ event.patch_set.deletes }}).
