@@ -66,6 +66,7 @@ def make_and_connect_client(hostname, username,
 
 
 def filter_by_prior(func):
+    """Filter that drops/ignores repeated event."""
 
     @six.wraps(func)
     def wrapper(self, event):
@@ -85,6 +86,7 @@ def filter_by_prior(func):
 
 
 def filter_by_email(func):
+    """Filter that drops/ignores events **not** from certain emails."""
 
     @six.wraps(func)
     def wrapper(self, event):
@@ -122,6 +124,8 @@ def filter_by_email(func):
 
 
 class Entity(object):
+    """A object representation of a gerrit author/person/some entity."""
+
     def __init__(self, username, name, email=None):
         self.username = username
         self.name = name
@@ -133,6 +137,8 @@ class Entity(object):
 
 
 class PatchSet(object):
+    """A object representation of a gerrit patchset."""
+
     def __init__(self, kind, author,
                  inserts, deletes,
                  uploader, revision, created_on):
@@ -153,6 +159,8 @@ class PatchSet(object):
 
 
 class Change(object):
+    """A object representation of a gerrit change."""
+
     def __init__(self, status, commit_message, number,
                  url, project, owner, subject,
                  branch, id, topic=None):
@@ -177,6 +185,8 @@ class Change(object):
 
 
 class PatchSetCreated(object):
+    """A object representation of a gerrit patchset creation event."""
+
     def __init__(self, patch_set, change, uploader, created_on):
         self.patch_set = patch_set
         self.change = change
@@ -192,6 +202,8 @@ class PatchSetCreated(object):
 
 
 class CommentAdded(object):
+    """A object representation of a gerrit patchset comment addition event."""
+
     def __init__(self, author, change, patch_set, created_on, comment=None):
         self.comment = comment
         self.patch_set = patch_set
@@ -208,7 +220,8 @@ class CommentAdded(object):
                    comment=data.get('comment'))
 
 
-class GerritWatcher(object):
+class GerritWatcher(threading.Thread):
+    """Thread that interacts with gerrit and emits activity events."""
 
     SELECT_WAIT = 0.1
     GERRIT_ACTIVITY = "GERRIT_ACTIVITY"
@@ -218,14 +231,13 @@ class GerritWatcher(object):
         self.dead = threading.Event()
         self.notifier = notifier.Notifier()
         self.log = log
-        self.make_a_client = make_a_client
+        self.client = make_a_client()
+        # Keep this around if we have to make a new client (in-case
+        # the old one fails to work at some point in time, say due to
+        # being disconnected).
+        self._make_a_client = make_a_client
 
-    def run(self, client=None):
-        # This is needed (to be an array) since python is sorta crappy
-        # about having variables that u change in local functions...
-        if client is None:
-            client = self.connect()
-        clients = [client]
+    def run(self):
 
         def retry_if_io_error(excp):
             try_again = isinstance(excp, (paramiko.ChannelException, IOError))
@@ -248,9 +260,9 @@ class GerritWatcher(object):
         def run_forever_until_dead():
             if self.dead.is_set():
                 return
-            client = clients[0]
+            client = self.client
             if not client.connected:
-                clients[0] = client = self.make_a_client()
+                self.client = client = self._make_a_client()
             try:
                 _stdin, stdout, _stderr = client.exec_command(
                     "gerrit stream-events")
@@ -272,8 +284,7 @@ class GerritWatcher(object):
         try:
             run_forever_until_dead()
         finally:
-            clients[0].close()
-            clients = []
+            self.client.close()
 
 
 class GerritBotPlugin(BotPlugin):
@@ -323,7 +334,6 @@ class GerritBotPlugin(BotPlugin):
     def __init__(self, bot):
         super(GerritBotPlugin, self).__init__(bot)
         self.watcher = None
-        self.watcher_runner = None
         self.seen_reviews = None
         self.statistics = copy.deepcopy(self.DEF_STATS)
 
@@ -459,16 +469,11 @@ class GerritBotPlugin(BotPlugin):
         self.watcher = GerritWatcher(self.log, make_a_client)
         self.watcher.notifier.register(
             self.watcher.GERRIT_ACTIVITY, self.process_event)
-        self.watcher_runner = threading.Thread(
-            target=self.watcher.run,
-            kwargs={'client': make_a_client()})
-        self.watcher_runner.daemon = True
-        self.watcher_runner.start()
+        self.watcher.start()
 
     def deactivate(self):
         super(GerritBotPlugin, self).deactivate()
-        if self.watcher_runner is not None:
+        if self.watcher is not None:
             self.watcher.dead.set()
-            self.watcher_runner.join()
+            self.watcher.join()
             self.watcher = None
-            self.watcher_runner = None
