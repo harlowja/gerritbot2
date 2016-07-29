@@ -1,3 +1,18 @@
+# -*- coding: utf-8 -*-
+
+#
+#    Licensed under the Apache License, Version 2.0 (the "License"); you may
+#    not use this file except in compliance with the License. You may obtain
+#    a copy of the License at
+#
+#         http://www.apache.org/licenses/LICENSE-2.0
+#
+#    Unless required by applicable law or agreed to in writing, software
+#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+#    License for the specific language governing permissions and limitations
+#    under the License.
+
 from __future__ import absolute_import
 from __future__ import unicode_literals
 
@@ -285,7 +300,7 @@ class GerritBotPlugin(BotPlugin):
     DEF_STATS = {
         'event_types': collections.defaultdict(int),
         'reviewers': collections.defaultdict(int),
-        'commenters': collections.defaultdict(int),
+        'uploaders': collections.defaultdict(int),
         'projects': collections.defaultdict(int),
     }
 
@@ -301,6 +316,8 @@ class GerritBotPlugin(BotPlugin):
         'max_cache_size': 1000,
         'max_cache_seen_ttl': 60 * 60,
         'projects': [],
+        # See: https://pypi.python.org/pypi/tabulate
+        'tabulate_format': 'plain',
     }
 
     def __init__(self, bot):
@@ -366,9 +383,10 @@ class GerritBotPlugin(BotPlugin):
                 else:
                     for k in sorted(six.iterkeys(self.statistics[tbl_name])):
                         tbl.append([k, self.statistics[tbl_name][k]])
-                buf.write(tabulate(tbl, header, tablefmt="pipe"))
+                buf.write(tabulate(tbl, header,
+                                   tablefmt=self.config['tabulate_format']))
                 if i + 1 != len(just_tables):
-                    buf.write("\n\n")
+                    buf.write("\n")
                 else:
                     buf.write("\n")
         return buf.getvalue()
@@ -380,16 +398,27 @@ class GerritBotPlugin(BotPlugin):
             return
         self.statistics['event_types'][event_type] += 1
         event_cls = self.GERRIT_EVENTS.get(event_type)
-        if event_cls is None:
-            self.log.info("Discarding event '%s', event type not known",
-                          event_type)
-            return
         event = details['event']
+        if not event_cls:
+            self.log.info("Discarding event '%s' with data %s since that"
+                          " event type is not known.",
+                          event_type, event)
+            return
         self.log.debug("Processing event %s using cls %s", event, event_cls)
         event = event_cls.from_data(event)
         event_project = None
         if isinstance(event, (PatchSetCreated, CommentAdded)):
             event_project = event.change.project
+        if event_project is not None:
+            self.statistics['projects'][event_project] += 1
+        if isinstance(event, CommentAdded):
+            who = event.author.email
+            if who:
+                self.statistics['reviewers'][who] += 1
+        if isinstance(event, PatchSetCreated):
+            who = event.uploader.email
+            if who:
+                self.statistics['uploaders'][who] += 1
         if (event_project is None or
                 (self.config['projects']
                  and event_project not in self.config['projects'])):
