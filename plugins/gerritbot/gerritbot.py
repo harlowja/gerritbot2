@@ -33,36 +33,21 @@ from errbot import botcmd
 
 import cachetools
 import notifier
-import paramiko
 import retrying
+
+import paho.mqtt.client as mqtt
 
 import six
 from tabulate import tabulate
 
 
-def get_gerrit_user():
-    user = os.getenv("GERRIT_USER")
-    if user:
-        return user
-    return getpass.getuser()
-
-
-def make_and_connect_client(hostname, username,
-                            port=29418, key_filename=None):
-    client = paramiko.SSHClient()
-    client.load_system_host_keys()
-    client.set_missing_host_key_policy(paramiko.WarningPolicy())
-    try:
-        client.connect(hostname, username=username,
-                       port=port, key_filename=key_filename)
-    except paramiko.SSHException:
-        # TODO(harlowja): add something into paramiko so that we can
-        # actually tell if its connected or not...
-        client.connected = False
-        raise
-    else:
-        client.connected = True
-        return client
+def make_a_client(on_connect, on_message,
+                  hose_url='firehose.openstack.org', hose_port=80):
+    client = mqtt.Client(transport="websockets")
+    client.on_connect = on_connect
+    client.on_message = on_message
+    client.connect(hose_url, port=hose_port)
+    return client
 
 
 def filter_by_prior(func):
@@ -218,73 +203,6 @@ class CommentAdded(object):
                    PatchSet.from_data(data['patchSet']),
                    datetime.fromtimestamp(data['eventCreatedOn']),
                    comment=data.get('comment'))
-
-
-class GerritWatcher(threading.Thread):
-    """Thread that interacts with gerrit and emits activity events."""
-
-    SELECT_WAIT = 0.1
-    GERRIT_ACTIVITY = "GERRIT_ACTIVITY"
-
-    def __init__(self, log, make_a_client):
-        super(GerritWatcher, self).__init__()
-        self.dead = threading.Event()
-        self.notifier = notifier.Notifier()
-        self.log = log
-        self.client = make_a_client()
-        # Keep this around if we have to make a new client (in-case
-        # the old one fails to work at some point in time, say due to
-        # being disconnected).
-        self._make_a_client = make_a_client
-
-    def run(self):
-
-        def retry_if_io_error(excp):
-            try_again = isinstance(excp, (paramiko.ChannelException, IOError))
-            if try_again:
-                self.log.exception("Failed with exception (retrying)",
-                                   exc_info=True)
-                self.bot_plugin.warn_admins("Gerrit watching failed"
-                                            " due to '%s' (retrying)" % excp)
-            else:
-                self.log.exception("Failed with exception (not retrying)",
-                                   exc_info=True)
-                self.bot_plugin.warn_admins("Gerrit watching failed"
-                                            " due to '%s' (not"
-                                            " retrying)" % excp)
-            return try_again
-
-        @retrying.retry(
-            wait_exponential_multiplier=1000, wait_exponential_max=10000,
-            retry_on_exception=retry_if_io_error)
-        def run_forever_until_dead():
-            if self.dead.is_set():
-                return
-            client = self.client
-            if not client.connected:
-                self.client = client = self._make_a_client()
-            try:
-                _stdin, stdout, _stderr = client.exec_command(
-                    "gerrit stream-events")
-                while not self.dead.is_set():
-                    rlist, _wlist, _xlist = select.select(
-                        [stdout.channel],
-                        [], [], self.SELECT_WAIT)
-                    if not rlist:
-                        continue
-                    event_data = {
-                        "event": json.loads(stdout.readline()),
-                    }
-                    self.notifier.notify(
-                        self.GERRIT_ACTIVITY, event_data)
-            finally:
-                client.close()
-                client.connected = False
-
-        try:
-            run_forever_until_dead()
-        finally:
-            self.client.close()
 
 
 class GerritBotPlugin(BotPlugin):
