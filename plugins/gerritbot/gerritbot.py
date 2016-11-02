@@ -25,7 +25,6 @@ import getpass
 import json
 import os
 import select
-import string
 import threading
 
 from errbot import BotPlugin
@@ -38,17 +37,12 @@ import retrying
 import paho.mqtt.client as mqtt
 
 import six
+from six.moves import queue as compat_queue
 from tabulate import tabulate
 
 
-def make_a_client(on_connect, on_message, on_disconnect, on_log,
-                  transport='websockets'):
-    client = mqtt.Client(transport=transport)
-    client.on_connect = on_connect
-    client.on_message = on_message
-    client.on_log = on_log
-    client.on_disconnect = on_disconnect
-    return client
+def str_split(text):
+    return text.split()
 
 
 def filter_by_prior(func):
@@ -236,10 +230,9 @@ class GerritBotPlugin(BotPlugin):
 
     #: Default configuration template that should be provided...
     DEF_CONFIG = {
-        'gerrit_hostname': 'review.openstack.org',
-        'gerrit_port': 29418,
-        'gerrit_user': get_gerrit_user(),
-        'gerrit_keyfile': '~/.ssh/id_rsa.pub',
+        'firehose_host': 'firehose.openstack.org',
+        'firehose_transport': "tcp",
+        'firehose_port': 1883,
         'email_suffixes': [],
         'emails': [],
         'include_commit_body': False,
@@ -252,8 +245,11 @@ class GerritBotPlugin(BotPlugin):
 
     def __init__(self, bot):
         super(GerritBotPlugin, self).__init__(bot)
-        self.watcher = None
+        self.client = None
+        self.work_queue = None
         self.seen_reviews = None
+        self.processor = None
+        self.dying = False
         self.statistics = copy.deepcopy(self.DEF_STATS)
 
     def configure(self, configuration):
@@ -294,7 +290,7 @@ class GerritBotPlugin(BotPlugin):
                     summary=summary)
 
     @botcmd(name="gerrit_stats", historize=False,
-            split_args_with=string.split)
+            split_args_with=str_split)
     def stats(self, msg, args):
         self.log.debug("Stats called with args: %s", args)
         buf = six.StringIO()
@@ -320,7 +316,20 @@ class GerritBotPlugin(BotPlugin):
                     buf.write("\n")
         return buf.getvalue()
 
-    def process_event(self, event_type, details):
+    def loop_process_events(self):
+        while True:
+            details = self.work_queue.get()
+            if details is None:
+                self.work_queue.task_done()
+                break
+            else:
+                try:
+                    if not self.dying:
+                        self.process_event(details)
+                finally:
+                    self.work_queue.task_done()
+
+    def process_event(self, details):
         try:
             event_type = details['event'].pop('type')
         except KeyError:
@@ -375,24 +384,61 @@ class GerritBotPlugin(BotPlugin):
 
     def activate(self):
         super(GerritBotPlugin, self).activate()
+        self.work_queue = compat_queue.Queue()
+        self.dying = False
+
+        def on_connect(client, userdata, flags, rc):
+            if rc == mqtt.MQTT_ERR_SUCCESS:
+                self.log.info("MQTT connected to %s:%s over %s",
+                              self.config['firehose_host'],
+                              self.config['firehose_port'],
+                              self.config['firehose_transport'])
+                client.subscribe('#')
+            else:
+                self.log.error(
+                    "MQTT not connected to %s:%s over %s, rc=%s",
+                    self.config['firehose_host'],
+                    self.config['firehose_port'],
+                    self.config['firehose_transport'], rc)
+
+        def on_message(client, userdata, msg):
+            if not msg.topic or not msg.payload:
+                return
+            self.log.info(("Dispatching message on topic=%s"
+                           " with payload=%s"), msg.topic, msg.payload)
+            try:
+                payload = msg.payload
+                if isinstance(payload, six.binary_type):
+                    payload = payload.decode("utf8")
+                details = {'event': json.loads(payload)}
+            except (UnicodeError, ValueError):
+                self.log.exception(
+                    "Received corrupted/invalid payload: %s", msg.payload)
+            else:
+                self.work_queue.put(details)
+
         self.seen_reviews = cachetools.TTLCache(
             self.config['max_cache_size'],
             self.config['max_cache_seen_ttl'])
         self.statistics = copy.deepcopy(self.DEF_STATS)
-        make_a_client = functools.partial(
-            make_and_connect_client,
-            self.config['gerrit_hostname'],
-            self.config['gerrit_user'],
-            port=int(self.config['gerrit_port']),
-            key_filename=os.path.expanduser(self.config['gerrit_keyfile']))
-        self.watcher = GerritWatcher(self.log, make_a_client)
-        self.watcher.notifier.register(
-            self.watcher.GERRIT_ACTIVITY, self.process_event)
-        self.watcher.start()
+        self.client = mqtt.Client(transport=self.config['firehose_transport'])
+        self.client.on_connect = on_connect
+        self.client.on_message = on_message
+        self.client.connect(self.config['firehose_host'],
+                            port=int(self.config['firehose_port']))
+        self.client.loop_start()
+        self.processor = threading.Thread(target=self.loop_process_events)
+        self.processor.daemon = True
+        self.processor.start()
 
     def deactivate(self):
         super(GerritBotPlugin, self).deactivate()
-        if self.watcher is not None:
-            self.watcher.dead.set()
-            self.watcher.join()
-            self.watcher = None
+        self.dying = True
+        if self.client is not None:
+            self.client.loop_stop()
+            self.client = None
+        if self.processor is not None:
+            self.work_queue.put(None)
+            self.work_queue.join()
+            self.processor.join()
+            self.processor = None
