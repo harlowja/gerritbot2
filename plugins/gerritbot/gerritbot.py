@@ -41,12 +41,13 @@ import six
 from tabulate import tabulate
 
 
-def make_a_client(on_connect, on_message,
-                  hose_url='firehose.openstack.org', hose_port=80):
-    client = mqtt.Client(transport="websockets")
+def make_a_client(on_connect, on_message, on_disconnect, on_log,
+                  transport='websockets'):
+    client = mqtt.Client(transport=transport)
     client.on_connect = on_connect
     client.on_message = on_message
-    client.connect(hose_url, port=hose_port)
+    client.on_log = on_log
+    client.on_disconnect = on_disconnect
     return client
 
 
