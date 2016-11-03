@@ -17,20 +17,10 @@ default)::
 
 
     {
-        # gerrit hostname to connect to
-        'gerrit_hostname': 'review.openstack.org',
-
-        # ssh port to connect to
-        'gerrit_port': 29418,
-
-        # gerrit user the connection will be initiated under; this will
-        # by default use either the running user or a override that can be set
-        # by exporting the environment variable GERRIT_USER
-        'gerrit_user': get_gerrit_user(),
-
-        # public key file that the gerrit user will use during
-        # this connection process
-        'gerrit_keyfile': '~/.ssh/id_rsa.pub',
+        # MQTT firehose settings/host/port.
+        'firehose_host': 'firehose.openstack.org',
+        'firehose_transport': "tcp",
+        'firehose_port': 1883,
 
         # patchset reviews with only these suffixes (or equivalent
         # emails will be allowed); if suffixes is empty than all emails
