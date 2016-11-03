@@ -2,8 +2,8 @@
 Gerritbot version 2.0
 =====================
 
-A (errbot based) gerrit bot/plugin that can communicate with with the
-gerrit event ssh stream and receive events and drop those events into
+A (errbot based) gerrit bot/plugin that can communicate with the
+gerrit event MQTT stream and receive events and drop those events into
 slack (or other backends) using built-in templates.
 
 Ensure that before using you:
