@@ -20,25 +20,20 @@ from datetime import datetime
 
 import collections
 import copy
-import functools
-import getpass
 import json
-import os
-import select
 import threading
 
 from errbot import BotPlugin
 from errbot import botcmd
 
 import cachetools
-import notifier
-import retrying
-
 import paho.mqtt.client as mqtt
 
 import six
 from six.moves import queue as compat_queue
 from tabulate import tabulate
+
+TOMBSTONE = object()
 
 
 def str_split(text):
@@ -317,9 +312,9 @@ class GerritBotPlugin(BotPlugin):
         return buf.getvalue()
 
     def loop_process_events(self):
-        while True:
+        while not self.dying:
             details = self.work_queue.get()
-            if details is None:
+            if details is TOMBSTONE:
                 self.work_queue.task_done()
                 break
             else:
@@ -438,7 +433,7 @@ class GerritBotPlugin(BotPlugin):
             self.client.loop_stop()
             self.client = None
         if self.processor is not None:
-            self.work_queue.put(None)
+            self.work_queue.put(TOMBSTONE)
             self.work_queue.join()
             self.processor.join()
             self.processor = None

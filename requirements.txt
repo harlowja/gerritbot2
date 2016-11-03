@@ -1,7 +1,5 @@
 errbot
 six
-notifier
-retrying
 cachetools
 tabulate
 paho-mqtt
