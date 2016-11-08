@@ -269,10 +269,10 @@ class GerritBotPlugin(BotPlugin):
                     link = "https://"
                 else:
                     link = "http://"
-                link += "review.openstack.org/changes/%s" % review_id
                 review_url = link + "review.openstack.org/#/c/%s" % review_id
+                json_url = link + "review.openstack.org/changes/%s" % review_id
                 try:
-                    rsp = requests.get(link, timeout=10)
+                    rsp = requests.get(json_url, timeout=10)
                     rsp.raise_for_status()
                 except (requests.ConnectionError,
                         requests.ConnectTimeout,
