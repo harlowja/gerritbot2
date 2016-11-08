@@ -21,6 +21,7 @@ from datetime import datetime
 import collections
 import copy
 import json
+import re
 import threading
 
 from errbot import BotPlugin
@@ -28,6 +29,7 @@ from errbot import botcmd
 
 import cachetools
 import paho.mqtt.client as mqtt
+import requests
 
 import six
 from six.moves import queue as compat_queue
@@ -256,6 +258,39 @@ class GerritBotPlugin(BotPlugin):
 
     def get_configuration_template(self):
         return copy.deepcopy(self.DEF_CONFIG)
+
+    def callback_message(self, message):
+        body = message.body
+        if body:
+            review_ids = re.findall(
+               r"http([s])?://review.openstack.org/#/c/(\d+)", body)
+            for is_https, review_id in review_ids:
+                if is_https:
+                    link = "https://"
+                else:
+                    link = "http://"
+                link += "review.openstack.org/changes/%s" % review_id
+                try:
+                    rsp = requests.get(link, timeout=10)
+                    rsp.raise_for_status()
+                except (requests.ConnectionError,
+                        requests.ConnectTimeout,
+                        requests.RequestException):
+                    pass
+                else:
+                    try:
+                        content = rsp.text.split("\n", 1)[1]
+                        content = json.loads(content)
+                        content['url'] = link
+                    except (ValueError, TypeError):
+                        pass
+                    else:
+                        summary = self._bot.process_template(
+                            'review', {'review': content})
+                        self.send_card(
+                            to=message.frm,
+                            link=link,
+                            summary=summary)
 
     @filter_by_email
     @filter_by_prior

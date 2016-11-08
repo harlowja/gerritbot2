@@ -3,3 +3,4 @@ six
 cachetools
 tabulate
 paho-mqtt
+requests
