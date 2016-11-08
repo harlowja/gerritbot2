@@ -270,6 +270,7 @@ class GerritBotPlugin(BotPlugin):
                 else:
                     link = "http://"
                 link += "review.openstack.org/changes/%s" % review_id
+                review_url = link + "review.openstack.org/#/c/%s" % review_id
                 try:
                     rsp = requests.get(link, timeout=10)
                     rsp.raise_for_status()
@@ -281,7 +282,7 @@ class GerritBotPlugin(BotPlugin):
                     try:
                         content = rsp.text.split("\n", 1)[1]
                         content = json.loads(content)
-                        content['url'] = link
+                        content['url'] = review_url
                     except (ValueError, TypeError):
                         pass
                     else:
@@ -289,7 +290,7 @@ class GerritBotPlugin(BotPlugin):
                             'review', {'review': content})
                         self.send_card(
                             to=message.frm,
-                            link=link,
+                            link=review_url,
                             summary=summary)
 
     @filter_by_email
