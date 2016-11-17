@@ -4,3 +4,4 @@ cachetools
 tabulate
 paho-mqtt
 requests
+tenacity

@@ -21,8 +21,10 @@ from datetime import datetime
 import collections
 import copy
 import json
+import logging
 import re
 import threading
+import time
 
 from errbot import BotPlugin
 from errbot import botcmd
@@ -30,6 +32,7 @@ from errbot import botcmd
 import cachetools
 import paho.mqtt.client as mqtt
 import requests
+import tenacity
 
 import six
 from six.moves import queue as compat_queue
@@ -413,10 +416,9 @@ class GerritBotPlugin(BotPlugin):
                                    " to '%s'", event_type,
                                    event_type_func)
 
-    def activate(self):
-        super(GerritBotPlugin, self).activate()
-        self.work_queue = compat_queue.Queue()
-        self.dying = False
+    def loop_client_recv(self):
+        # The built-in client loop_forever seems busted (it doesn't retry
+        # under all exceptions, so just do it ourselves...); arg...
 
         def on_connect(client, userdata, flags, rc):
             if rc == mqtt.MQTT_ERR_SUCCESS:
@@ -448,16 +450,43 @@ class GerritBotPlugin(BotPlugin):
             else:
                 self.work_queue.put(details)
 
+        @tenacity.retry(
+            wait=tenacity.wait_exponential(multiplier=1, max=30),
+            before=tenacity.before_log(self.log, logging.INFO))
+        def loop_forever_until_dead():
+            client = mqtt.Client(transport=self.config['firehose_transport'])
+            client.on_connect = on_connect
+            client.on_message = on_message
+            try:
+                client.connect(self.config['firehose_host'],
+                               port=int(self.config['firehose_port']))
+                max_timeout = 1
+                while not self.dying:
+                    rc = mqtt.MQTT_ERR_SUCCESS
+                    start = time.time()
+                    elapsed = 0
+                    while rc == mqtt.MQTT_ERR_SUCCESS and (elapsed < max_timeout):
+                        rc = client.loop(timeout=max(0, max_timeout - elapsed))
+                        elapsed = time.time() - start
+                    if not self.dying:
+                        time.sleep(0.1)
+            except Exception:
+                self.log.exception("Failed mqtt client usage, retrying")
+                raise
+
+        loop_forever_until_dead()
+
+    def activate(self):
+        super(GerritBotPlugin, self).activate()
+        self.work_queue = compat_queue.Queue()
+        self.dying = False
         self.seen_reviews = cachetools.TTLCache(
             self.config['max_cache_size'],
             self.config['max_cache_seen_ttl'])
         self.statistics = copy.deepcopy(self.DEF_STATS)
-        self.client = mqtt.Client(transport=self.config['firehose_transport'])
-        self.client.on_connect = on_connect
-        self.client.on_message = on_message
-        self.client.connect(self.config['firehose_host'],
-                            port=int(self.config['firehose_port']))
-        self.client.loop_start()
+        self.client = threading.Thread(target=self.loop_client_recv)
+        self.client.daemon = True
+        self.client.start()
         self.processor = threading.Thread(target=self.loop_process_events)
         self.processor.daemon = True
         self.processor.start()
@@ -466,7 +495,7 @@ class GerritBotPlugin(BotPlugin):
         super(GerritBotPlugin, self).deactivate()
         self.dying = True
         if self.client is not None:
-            self.client.loop_stop()
+            self.client.join()
             self.client = None
         if self.processor is not None:
             self.work_queue.put(TOMBSTONE)
