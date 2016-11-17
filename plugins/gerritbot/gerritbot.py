@@ -454,6 +454,8 @@ class GerritBotPlugin(BotPlugin):
             wait=tenacity.wait_exponential(multiplier=1, max=30),
             before=tenacity.before_log(self.log, logging.INFO))
         def loop_forever_until_dead():
+            if self.dying:
+                return
             client = mqtt.Client(transport=self.config['firehose_transport'])
             client.on_connect = on_connect
             client.on_message = on_message
